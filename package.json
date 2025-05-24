@@ -1,17 +1,10 @@
 {
-  "name": "cleancopy",
-  "version": "1.0.0",
-  "description": "",
-  "main": "classify.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+  "name": "volume-copy-app",
+  "main": "index.html",
+  "window": {
+    "title": "Volume Copy App",
+    "width": 600,
+    "height": 500
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "dependencies": {
-    "@tensorflow/tfjs-node": "4.22.0",
-    "axios": "^1.9.0",
-    "nsfwjs": "4.2.1"
-  }
+  "dependencies": {}
 }
