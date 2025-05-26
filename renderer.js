@@ -1,18 +1,52 @@
+// renderer.js
+// Ported from app.js for Electron
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const tf = require('@tensorflow/tfjs-node');
 const nsfw = require('nsfwjs');
 const { extractThumbnails } = require('./video_utils');
+const pLimit = require('p-limit');
 
-// File type extensions
 const AUDIO_EXT = ['.mp3', '.wav', '.aac', '.flac', '.ogg', '.m4a'];
 const VIDEO_EXT = ['.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm'];
 const IMAGE_EXT = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp'];
 const DOC_EXT = ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.txt', '.md', '.rtf', '.odt'];
 
-console.log('hfshfsdhf!');
-// Helper to get local volumes (cross-platform)
+const NSFW_CONCURRENCY = 2;
+const nsfwLimit = pLimit(NSFW_CONCURRENCY);
+
+// Store scroll positions for each list
+let listScrollTops = {};
+
+function saveListScrollTops() {
+  Object.keys(expandedTypes).forEach(type => {
+    if (expandedTypes[type]) {
+      const ul = document.getElementById('filelist-' + type);
+      if (ul) listScrollTops[type] = ul.scrollTop;
+    }
+  });
+}
+
+function restoreListScrollTops() {
+  Object.keys(expandedTypes).forEach(type => {
+    if (expandedTypes[type]) {
+      const ul = document.getElementById('filelist-' + type);
+      if (ul && listScrollTops[type] !== undefined) ul.scrollTop = listScrollTops[type];
+    }
+  });
+}
+
+function logToScreen(msg) {
+  const logDiv = document.getElementById('log');
+  if (logDiv) {
+    logDiv.textContent += msg + '\n';
+    logDiv.scrollTop = logDiv.scrollHeight;
+  }
+}
+console.log = (...args) => { logToScreen(args.join(' ')); };
+console.error = (...args) => { logToScreen('ERROR: ' + args.join(' ')); };
+
 function getVolumes() {
   const platform = os.platform();
   if (platform === 'darwin') {
@@ -25,7 +59,7 @@ function getVolumes() {
     return ['/'];
   } else if (platform === 'win32') {
     const drives = [];
-    for (let i = 67; i <= 90; i++) { // C: to Z:
+    for (let i = 67; i <= 90; i++) {
       const drive = String.fromCharCode(i) + ':\\';
       if (fs.existsSync(drive)) drives.push(drive);
     }
@@ -34,35 +68,29 @@ function getVolumes() {
   return ['/'];
 }
 
-// Helper to get free space (in bytes) for a volume
 function getFreeSpace(volume) {
   try {
-    // Use statvfs on Unix, fs.statSync fallback for Windows
     if (os.platform() === 'win32') {
-      // On Windows, use fs.statvfsSync if available, else skip
-      // (For demo, just return 1TB)
       return 1 * 1024 * 1024 * 1024 * 1024;
     } else {
       const stat = fs.statSync(volume);
       if (stat && stat.dev) {
-        // Use 'df' command for Unix
         const df = require('child_process').execSync(`df -k '${volume.replace(/'/g, "'\\''")}'`).toString();
         const lines = df.split('\n');
         if (lines.length > 1) {
           const parts = lines[1].split(/\s+/);
           if (parts.length > 3) {
-            return parseInt(parts[3], 10) * 1024; // available in bytes
+            return parseInt(parts[3], 10) * 1024;
           }
         }
       }
     }
-  } catch (e) {}
+  } catch (e) { console.error('getFreeSpace error:', e); }
   return 0;
 }
 
-// UI State
 let state = {
-  screen: 'main', // main, analyzing, copy, confirm, progress
+  screen: 'main',
   source: null,
   destination: null,
   destFolder: null,
@@ -108,44 +136,48 @@ document.addEventListener('keydown', (e) => {
 let nsfwModel = null;
 async function loadNSFWModel() {
   if (!nsfwModel) {
-    console.log('gonna load');
-    try {
-        nsfwModel = await nsfw.load('http://localhost:7001/models/mobilenet_v2/');
-    } catch (err) {
-        console.error(err);
-    }
-    console.log('loaded');
+    nsfwModel = await nsfw.load('file://./models/mobilenet_v2/model.json');
   }
   return nsfwModel;
 }
 
-// Add a log area to the UI and override console.log/error to show logs on screen
-function logToScreen(msg) {
-  const logDiv = document.getElementById('log');
-  if (logDiv) {
-    logDiv.textContent += msg + '\n';
-    logDiv.scrollTop = logDiv.scrollHeight;
-  }
+// Add expanded state for collapsible lists
+let expandedTypes = {
+  audio: false,
+  video: false,
+  image: false,
+  doc: false,
+  other: false,
+  nsfwImages: false,
+  nsfwVideos: false
+};
+
+function toggleType(type) {
+  expandedTypes[type] = !expandedTypes[type];
+  render();
 }
-console.log = (...args) => { logToScreen(args.join(' ')); };
-console.error = (...args) => { logToScreen('ERROR: ' + args.join(' ')); };
+
+function getFilesByType(type) {
+  return state.analyze.files.filter(file => {
+    const ext = path.extname(file).toLowerCase();
+    if (type === 'audio') return AUDIO_EXT.includes(ext);
+    if (type === 'video') return VIDEO_EXT.includes(ext);
+    if (type === 'image') return IMAGE_EXT.includes(ext);
+    if (type === 'doc') return DOC_EXT.includes(ext);
+    if (type === 'other') return (
+      !AUDIO_EXT.includes(ext) &&
+      !VIDEO_EXT.includes(ext) &&
+      !IMAGE_EXT.includes(ext) &&
+      !DOC_EXT.includes(ext)
+    );
+    return false;
+  });
+}
 
 function render() {
+  saveListScrollTops();
   const app = document.getElementById('app');
   app.innerHTML = '';
-  // Add log area at the top
-  let logDiv = document.getElementById('log');
-  if (!logDiv) {
-    logDiv = document.createElement('div');
-    logDiv.id = 'log';
-    logDiv.style.whiteSpace = 'pre';
-    logDiv.style.background = '#222';
-    logDiv.style.color = '#fff';
-    logDiv.style.padding = '10px';
-    logDiv.style.maxHeight = '200px';
-    logDiv.style.overflow = 'auto';
-    document.body.insertBefore(logDiv, app);
-  }
   if (state.screen === 'main') {
     renderMainScreen(app);
   } else if (state.screen === 'analyzing') {
@@ -157,6 +189,7 @@ function render() {
   } else if (state.screen === 'progress') {
     renderProgressScreen(app);
   }
+  restoreListScrollTops();
 }
 
 function renderMainScreen(app) {
@@ -199,7 +232,7 @@ function renderMainScreen(app) {
 
 function renderAnalyzingScreen(app) {
   const title = document.createElement('h2');
-  title.textContent = state.analyze.done ? 'Fdidididiles to copy' : 'Analyzing Volume...';
+  title.textContent = state.analyze.done ? 'Files to copy' : 'Analyzing Volume...';
   app.appendChild(title);
 
   if (!state.debug) {
@@ -236,72 +269,57 @@ function renderAnalyzingScreen(app) {
     app.appendChild(progressContainer);
   } else {
     // Detailed debug view
-    // Breakdown for 'other' file types
-    let otherBreakdown = '';
-    if (state.analyze.done && state.analyze.other > 0) {
-      const extCounts = {};
-      for (const file of state.analyze.files) {
-        const ext = path.extname(file).toLowerCase();
-        if (
-          !AUDIO_EXT.includes(ext) &&
-          !VIDEO_EXT.includes(ext) &&
-          !IMAGE_EXT.includes(ext) &&
-          !DOC_EXT.includes(ext)
-        ) {
-          extCounts[ext || '(no ext)'] = (extCounts[ext || '(no ext)'] || 0) + 1;
-        }
+    function makeSection(label, type, count, files) {
+      const section = document.createElement('div');
+      section.style.marginBottom = '8px';
+      const header = document.createElement('div');
+      header.style.cursor = 'pointer';
+      header.style.fontWeight = 'bold';
+      header.onclick = () => toggleType(type);
+      header.textContent = `${label}: ${count} ${expandedTypes[type] ? '▼' : '▶'}`;
+      section.appendChild(header);
+      if (expandedTypes[type]) {
+        const list = document.createElement('ul');
+        list.id = 'filelist-' + type;
+        list.style.margin = '4px 0 4px 20px';
+        list.style.maxHeight = '200px';
+        list.style.overflowY = 'auto';
+        files.forEach(f => {
+          const li = document.createElement('li');
+          li.style.cursor = 'pointer';
+          li.style.color = '#0066cc';
+          li.textContent = f;
+          li.onclick = () => {
+            // Use Electron to open the file
+            require('electron').shell.openPath(f);
+          };
+          li.onmouseover = () => {
+            li.style.textDecoration = 'underline';
+          };
+          li.onmouseout = () => {
+            li.style.textDecoration = 'none';
+          };
+          list.appendChild(li);
+        });
+        section.appendChild(list);
       }
-      otherBreakdown = '<ul style="margin:0 0 0 20px;">';
-      for (const ext in extCounts) {
-        otherBreakdown += `<li>${ext}: <b>${extCounts[ext]}</b></li>`;
-      }
-      otherBreakdown += '</ul>';
+      return section;
     }
 
-    const progress = document.createElement('div');
-    progress.innerHTML = `
-      <p>Audio: <b>${state.analyze.audio}</b></p>
-      <p>Video: <b>${state.analyze.video}</b></p>
-      <p>Images: <b>${state.analyze.image}</b></p>
-      <p>Documents: <b>${state.analyze.doc}</b></p>
-      <p>Other: <b>${state.analyze.other}</b>${otherBreakdown}</p>
-      <p>NSFW Images: <b>${state.analyze.nsfwImages}</b></p>
-      <p>NSFW Videos: <b>${state.analyze.nsfwVideos}</b></p>
+    app.appendChild(makeSection('Audio', 'audio', state.analyze.audio, getFilesByType('audio')));
+    app.appendChild(makeSection('Video', 'video', state.analyze.video, getFilesByType('video')));
+    app.appendChild(makeSection('Images', 'image', state.analyze.image, getFilesByType('image')));
+    app.appendChild(makeSection('Documents', 'doc', state.analyze.doc, getFilesByType('doc')));
+    app.appendChild(makeSection('Other', 'other', state.analyze.other, getFilesByType('other')));
+    app.appendChild(makeSection('NSFW Images', 'nsfwImages', state.analyze.nsfwImages, state.analyze.nsfwImageFiles));
+    app.appendChild(makeSection('NSFW Videos', 'nsfwVideos', state.analyze.nsfwVideos, state.analyze.nsfwVideoFiles));
+
+    const nsfwDiv = document.createElement('div');
+    nsfwDiv.innerHTML = `
       <p>Total files: <b>${state.analyze.total}</b></p>
       <p>Total size: <b>${formatBytes(state.analyze.size)}</b></p>
     `;
-    app.appendChild(progress);
-
-    // Add file list with clickable links in debug mode
-    if (state.analyze.done) {
-      const fileList = document.createElement('div');
-      fileList.style.marginTop = '20px';
-      fileList.style.maxHeight = '300px';
-      fileList.style.overflowY = 'auto';
-      fileList.style.border = '1px solid #ccc';
-      fileList.style.padding = '10px';
-      
-      state.analyze.files.forEach(file => {
-        const fileItem = document.createElement('div');
-        fileItem.style.padding = '5px';
-        fileItem.style.cursor = 'pointer';
-        fileItem.style.color = '#0066cc';
-        fileItem.textContent = file;
-        fileItem.onclick = () => {
-          // Use NW.js to open the file
-          nw.Shell.openItem(file);
-        };
-        fileItem.onmouseover = () => {
-          fileItem.style.textDecoration = 'underline';
-        };
-        fileItem.onmouseout = () => {
-          fileItem.style.textDecoration = 'none';
-        };
-        fileList.appendChild(fileItem);
-      });
-      
-      app.appendChild(fileList);
-    }
+    app.appendChild(nsfwDiv);
   }
 
   if (!state.analyze.done) {
@@ -314,7 +332,7 @@ function renderAnalyzingScreen(app) {
   } else {
     const continueBtn = document.createElement('button');
     continueBtn.className = 'button';
-    continueBtn.textContent = 'Cndwidwontinue';
+    continueBtn.textContent = 'Continue';
     continueBtn.onclick = () => {
       state.screen = 'copy';
       render();
@@ -338,6 +356,7 @@ function startAnalyzing(volume) {
       try {
         const files = fs.readdirSync(dir);
         for (const file of files) {
+          if (file.startsWith('.')) continue; // Ignore hidden files and directories
           const fullPath = path.join(dir, file);
           try {
             const stat = fs.statSync(fullPath);
@@ -358,6 +377,7 @@ function startAnalyzing(volume) {
       try {
         const files = fs.readdirSync(dir);
         for (const file of files) {
+          if (file.startsWith('.')) continue; // Ignore hidden files and directories
           const fullPath = path.join(dir, file);
           try {
             const stat = fs.statSync(fullPath);
@@ -371,13 +391,16 @@ function startAnalyzing(volume) {
               if (AUDIO_EXT.includes(ext)) state.analyze.audio++;
               else if (VIDEO_EXT.includes(ext)) {
                 state.analyze.video++;
-                // NSFW check for video
-                nsfwPromises.push((async () => {
+                nsfwPromises.push(nsfwLimit(async () => {
                   try {
-                    const thumbs = await extractThumbnails(fullPath, 3, '.nwjs-thumbs');
+                    const thumbs = await extractThumbnails(fullPath, 3, '.electron-thumbs');
                     let nsfwFound = false;
                     for (const thumb of thumbs) {
                       try {
+                        if (!fs.existsSync(thumb)) {
+                          console.warn('Thumbnail missing, skipping:', thumb);
+                          continue;
+                        }
                         const image = await tf.node.decodeImage(require('fs').readFileSync(thumb), 3);
                         const predictions = await model.classify(image);
                         image.dispose();
@@ -385,7 +408,6 @@ function startAnalyzing(volume) {
                           nsfwFound = true;
                         }
                       } catch (e) { console.error('NSFW video image error:', e); }
-                      // Clean up thumbnail
                       try { require('fs').unlinkSync(thumb); } catch (e) {}
                     }
                     if (nsfwFound) {
@@ -394,12 +416,11 @@ function startAnalyzing(volume) {
                     }
                   } catch (e) { console.error('NSFW video error:', e); }
                   render();
-                })());
+                }));
               }
               else if (IMAGE_EXT.includes(ext)) {
                 state.analyze.image++;
-                // NSFW check for image
-                nsfwPromises.push((async () => {
+                nsfwPromises.push(nsfwLimit(async () => {
                   try {
                     const image = await tf.node.decodeImage(require('fs').readFileSync(fullPath), 3);
                     const predictions = await model.classify(image);
@@ -410,7 +431,7 @@ function startAnalyzing(volume) {
                     }
                   } catch (e) { console.error('NSFW image error:', e); }
                   render();
-                })());
+                }));
               }
               else if (DOC_EXT.includes(ext)) state.analyze.doc++;
               else state.analyze.other++;
@@ -468,14 +489,14 @@ function renderCopyScreen(app) {
 }
 
 function pickFolder(volume, cb) {
-  // Use NW.js file dialog to pick a folder
+  // Use Electron file dialog
   const input = document.createElement('input');
   input.type = 'file';
-  input.nwdirectory = true;
+  input.webkitdirectory = true;
   input.style.display = 'none';
   document.body.appendChild(input);
   input.onchange = () => {
-    cb(input.value || volume);
+    cb(input.files && input.files.length > 0 ? input.files[0].path : volume);
     document.body.removeChild(input);
   };
   input.click();
@@ -486,19 +507,47 @@ function renderConfirmScreen(app) {
   title.textContent = 'Confirm Copy';
   app.appendChild(title);
 
+  function makeSection(label, type, count, files) {
+    const section = document.createElement('div');
+    section.style.marginBottom = '8px';
+    const header = document.createElement('div');
+    header.style.cursor = 'pointer';
+    header.style.fontWeight = 'bold';
+    header.onclick = () => toggleType(type);
+    header.textContent = `${label}: ${count} ${expandedTypes[type] ? '▼' : '▶'}`;
+    section.appendChild(header);
+    if (expandedTypes[type]) {
+      const list = document.createElement('ul');
+      list.id = 'filelist-' + type;
+      list.style.margin = '4px 0 4px 20px';
+      list.style.maxHeight = '200px';
+      list.style.overflowY = 'auto';
+      files.forEach(f => {
+        const li = document.createElement('li');
+        li.textContent = f;
+        list.appendChild(li);
+      });
+      section.appendChild(list);
+    }
+    return section;
+  }
+
   const summary = document.createElement('div');
   summary.innerHTML = `
     <p>You want to copy <b>${state.filesToCopy.length}</b> items from <b>${state.source}</b> to <b>${state.destFolder}</b>.</p>
     <p>Total size: <b>${formatBytes(state.analyze.size)}</b></p>
-    <ul>
-      <li>Audio: <b>${state.analyze.audio}</b></li>
-      <li>Video: <b>${state.analyze.video}</b></li>
-      <li>Images: <b>${state.analyze.image}</b></li>
-      <li>Documents: <b>${state.analyze.doc}</b></li>
-      <li>Other: <b>${state.analyze.other}</b></li>
-    </ul>
   `;
   app.appendChild(summary);
+
+  app.appendChild(makeSection('Audio', 'audio', state.analyze.audio, getFilesByType('audio')));
+  app.appendChild(makeSection('Video', 'video', state.analyze.video, getFilesByType('video')));
+  app.appendChild(makeSection('Images', 'image', state.analyze.image, getFilesByType('image')));
+  app.appendChild(makeSection('Documents', 'doc', state.analyze.doc, getFilesByType('doc')));
+  app.appendChild(makeSection('Other', 'other', state.analyze.other, getFilesByType('other')));
+  // NSFW Images
+  app.appendChild(makeSection('NSFW Images', 'nsfwImages', state.analyze.nsfwImages, state.analyze.nsfwImageFiles));
+  // NSFW Videos
+  app.appendChild(makeSection('NSFW Videos', 'nsfwVideos', state.analyze.nsfwVideos, state.analyze.nsfwVideoFiles));
 
   const confirmBtn = document.createElement('button');
   confirmBtn.className = 'button';
@@ -529,7 +578,7 @@ function renderProgressScreen(app) {
     completeBtn.className = 'button';
     completeBtn.textContent = 'Complete';
     completeBtn.onclick = () => {
-      nw.App.quit();
+      window.close();
     };
     app.appendChild(completeBtn);
   }
@@ -550,7 +599,7 @@ function startCopy() {
       copied++;
       state.copyProgress = copied / total;
       render();
-      setTimeout(copyNext, 10); // Simulate async/progress
+      setTimeout(copyNext, 10);
     });
   }
   copyNext();
