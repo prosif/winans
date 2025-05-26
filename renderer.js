@@ -5,7 +5,7 @@ const os = require('os');
 const path = require('path');
 const tf = require('@tensorflow/tfjs-node');
 const nsfw = require('nsfwjs');
-const { extractThumbnails } = require('./video_utils');
+const { extractThumbnails, getVideoDuration } = require('./video_utils');
 const pLimit = require('p-limit');
 
 const AUDIO_EXT = ['.mp3', '.wav', '.aac', '.flac', '.ogg', '.m4a'];
@@ -96,7 +96,7 @@ let state = {
   destFolder: null,
   filesToCopy: [],
   copyProgress: 0,
-  debug: false,
+  debug: true,
   filterMode: 'explicit', // 'explicit', 'non-explicit', 'none'
   analyze: {
     running: false,
@@ -112,7 +112,9 @@ let state = {
     nsfwImages: 0,
     nsfwVideos: 0,
     nsfwImageFiles: [],
-    nsfwVideoFiles: []
+    nsfwVideoFiles: [],
+    nsfwImageScores: {}, // { [filePath]: { Hentai, Porn, Sexy } }
+    nsfwVideoScores: {}  // { [filePath]: { Hentai, Porn, Sexy } }
   }
 };
 
@@ -138,8 +140,8 @@ document.addEventListener('keydown', (e) => {
 function createDebugMenu() {
   const menu = document.createElement('div');
   menu.style.position = 'fixed';
-  menu.style.top = '10px';
-  menu.style.right = '10px';
+  menu.style.bottom = '20px';
+  menu.style.right = '20px';
   menu.style.background = '#f0f0f0';
   menu.style.padding = '10px';
   menu.style.borderRadius = '5px';
@@ -280,8 +282,27 @@ function createCloseButton() {
   return closeBtn;
 }
 
+// Add to state for NSFW progress
+let nsfwProgress = {
+  total: 0,
+  done: 0
+};
+
 function render() {
-  saveListScrollTops();
+  // Ensure log area exists at the top of the body
+  let logDiv = document.getElementById('log');
+  if (!logDiv) {
+    logDiv = document.createElement('div');
+    logDiv.id = 'log';
+    logDiv.style.whiteSpace = 'pre';
+    logDiv.style.background = '#222';
+    logDiv.style.color = '#fff';
+    logDiv.style.padding = '10px';
+    logDiv.style.maxHeight = '200px';
+    logDiv.style.overflow = 'auto';
+    document.body.insertBefore(logDiv, document.body.firstChild);
+  }
+
   const app = document.getElementById('app');
   app.innerHTML = '';
 
@@ -351,7 +372,9 @@ function renderMainScreen(app) {
         nsfwImages: 0,
         nsfwVideos: 0,
         nsfwImageFiles: [],
-        nsfwVideoFiles: []
+        nsfwVideoFiles: [],
+        nsfwImageScores: {},
+        nsfwVideoScores: {}
       };
       render();
       startAnalyzing(volume);
@@ -366,6 +389,21 @@ function renderAnalyzingScreen(app) {
   title.textContent = state.analyze.done ? 'Files to copy' : 'Analyzing Volume...';
   app.appendChild(title);
 
+  // NSFW progress bar (always show)
+  const nsfwBarContainer = document.createElement('div');
+  nsfwBarContainer.style.width = '100%';
+  nsfwBarContainer.style.maxWidth = '400px';
+  nsfwBarContainer.style.margin = '24px auto 12px auto';
+  const nsfwBar = document.createElement('div');
+  nsfwBar.className = 'progress-bar';
+  const nsfwBarInner = document.createElement('div');
+  nsfwBarInner.className = 'progress-bar-inner';
+  let nsfwProgressValue = nsfwProgress.total > 0 ? nsfwProgress.done / nsfwProgress.total : 1;
+  nsfwBarInner.style.width = `${nsfwProgressValue * 100}%`;
+  nsfwBar.appendChild(nsfwBarInner);
+  nsfwBarContainer.appendChild(nsfwBar);
+  app.appendChild(nsfwBarContainer);
+
   if (!state.debug) {
     // Simple progress view for non-debug mode
     const progressContainer = document.createElement('div');
@@ -374,19 +412,13 @@ function renderAnalyzingScreen(app) {
     progressContainer.style.margin = '20px auto';
     
     const progressBar = document.createElement('div');
-    progressBar.style.width = '100%';
-    progressBar.style.height = '20px';
-    progressBar.style.background = '#f0f0f0';
-    progressBar.style.borderRadius = '10px';
-    progressBar.style.overflow = 'hidden';
+    progressBar.className = 'progress-bar';
     
     const progressInner = document.createElement('div');
+    progressInner.className = 'progress-bar-inner';
     const progress = state.analyze.total > 0 ? (state.analyze.files.length / state.analyze.total) : 0;
     progressInner.style.width = `${progress * 100}%`;
-    progressInner.style.height = '100%';
-    progressInner.style.background = '#4CAF50';
-    progressInner.style.transition = 'width 0.3s ease';
-    
+    // Remove any color overrides, let CSS handle it
     progressBar.appendChild(progressInner);
     progressContainer.appendChild(progressBar);
     
@@ -419,9 +451,34 @@ function renderAnalyzingScreen(app) {
           const li = document.createElement('li');
           li.style.cursor = 'pointer';
           li.style.color = '#0066cc';
-          li.textContent = f;
+          let scoreStr = '';
+          if ((type === 'video' || type === 'nsfwVideos') && state.analyze.nsfwVideoScores[f]) {
+            const s = state.analyze.nsfwVideoScores[f];
+            scoreStr = ` (H:${s.Hentai.toFixed(2)} P:${s.Porn.toFixed(2)} S:${s.Sexy.toFixed(2)})`;
+            if (s.Hentai > 0.7 || s.Porn > 0.7 || s.Sexy > 0.6) {
+              li.style.fontWeight = 'bold';
+              li.style.color = 'red';
+            } else {
+              li.style.color = '#888';
+            }
+          } else if ((type === 'video' || type === 'nsfwVideos') && !state.analyze.nsfwVideoScores[f]) {
+            scoreStr = ' (no score)';
+            li.style.color = '#888';
+          } else if ((type === 'image' || type === 'nsfwImages') && state.analyze.nsfwImageScores[f]) {
+            const s = state.analyze.nsfwImageScores[f];
+            scoreStr = ` (H:${s.Hentai.toFixed(2)} P:${s.Porn.toFixed(2)} S:${s.Sexy.toFixed(2)})`;
+            if (s.Hentai > 0.7 || s.Porn > 0.7 || s.Sexy > 0.6) {
+              li.style.fontWeight = 'bold';
+              li.style.color = 'red';
+            } else {
+              li.style.color = '#888';
+            }
+          } else if ((type === 'image' || type === 'nsfwImages') && !state.analyze.nsfwImageScores[f]) {
+            scoreStr = ' (no score)';
+            li.style.color = '#888';
+          }
+          li.textContent = f + scoreStr;
           li.onclick = () => {
-            // Use Electron to open the file
             require('electron').shell.openPath(f);
           };
           li.onmouseover = () => {
@@ -481,38 +538,37 @@ function startAnalyzing(volume) {
     state.analyze.nsfwImageFiles = [];
     state.analyze.nsfwVideoFiles = [];
 
-    // First pass: count total files
-    let totalFiles = 0;
-    function countFiles(dir) {
+    // Count total NSFW files (images + videos)
+    let nsfwTotal = 0;
+    function countNSFW(dir) {
       try {
         const files = fs.readdirSync(dir);
         for (const file of files) {
-          if (file.startsWith('.')) continue; // Ignore hidden files and directories
+          if (file.startsWith('.')) continue;
           const fullPath = path.join(dir, file);
           try {
             const stat = fs.statSync(fullPath);
             if (stat.isDirectory()) {
-              countFiles(fullPath);
+              countNSFW(fullPath);
             } else if (stat.isFile()) {
               const ext = path.extname(file).toLowerCase();
-              if (AUDIO_EXT.includes(ext) || VIDEO_EXT.includes(ext) || 
-                  IMAGE_EXT.includes(ext) || DOC_EXT.includes(ext)) {
-                totalFiles++;
-              }
+              if (IMAGE_EXT.includes(ext) || VIDEO_EXT.includes(ext)) nsfwTotal++;
             }
-          } catch (e) { console.error('Stat error:', e); }
+          } catch (e) {}
         }
-      } catch (e) { console.error('Read dir error:', e); }
+      } catch (e) {}
     }
-    countFiles(volume);
-    state.analyze.total = totalFiles;
+    countNSFW(volume);
+    nsfwProgress.total = nsfwTotal;
+    nsfwProgress.done = 0;
+    render();
 
     let processedFiles = 0;
     async function scanDir(dir) {
       try {
         const files = fs.readdirSync(dir);
         for (const file of files) {
-          if (file.startsWith('.')) continue; // Ignore hidden files and directories
+          if (file.startsWith('.')) continue;
           const fullPath = path.join(dir, file);
           try {
             const stat = fs.statSync(fullPath);
@@ -522,61 +578,157 @@ function startAnalyzing(volume) {
               const ext = path.extname(file).toLowerCase();
               if (AUDIO_EXT.includes(ext) || VIDEO_EXT.includes(ext) || 
                   IMAGE_EXT.includes(ext) || DOC_EXT.includes(ext)) {
-                processedFiles++;
                 state.analyze.size += stat.size;
                 state.analyze.files.push(fullPath);
                 if (AUDIO_EXT.includes(ext)) state.analyze.audio++;
                 else if (VIDEO_EXT.includes(ext)) {
                   state.analyze.video++;
                   nsfwPromises.push(nsfwLimit(async () => {
+                    logToScreen(`Starting NSFW analysis for video: ${fullPath}`);
                     try {
-                      const thumbs = await extractThumbnails(fullPath, 3, '.electron-thumbs');
-                      let nsfwFound = false;
-                      for (const thumb of thumbs) {
+                      // Get video duration
+                      const duration = await getVideoDuration(fullPath);
+                      if (!duration || isNaN(duration) || duration <= 0) {
+                        logToScreen(`Could not get duration for video: ${fullPath}`);
+                        nsfwProgress.done++;
+                        render();
+                        return;
+                      }
+                      // Calculate main sample points (10%, 50%, 90%)
+                      const mainPercents = [0.1, 0.5, 0.9];
+                      const mainTimestamps = mainPercents.map(p => Math.max(0, Math.min(duration, p * duration)));
+                      let flaggedIdx = -1;
+                      let flaggedPreds = null;
+                      let flaggedTime = null;
+                      // Analyze main samples
+                      for (let i = 0; i < mainTimestamps.length; i++) {
+                        const ts = mainTimestamps[i];
+                        logToScreen(`Extracting and analyzing main sample ${i+1} at ${ts.toFixed(2)}s for video: ${fullPath}`);
+                        const thumbs = await extractThumbnails(fullPath, 1, '.electron-thumbs-nsfw', [ts]);
+                        if (!thumbs[0] || !fs.existsSync(thumbs[0])) {
+                          logToScreen(`Thumbnail missing for main sample at ${ts.toFixed(2)}s: ${thumbs[0]}`);
+                          continue;
+                        }
                         try {
-                          if (!fs.existsSync(thumb)) {
-                            console.warn('Thumbnail missing, skipping:', thumb);
+                          const image = await tf.node.decodeImage(require('fs').readFileSync(thumbs[0]), 3);
+                          const predictions = await model.classify(image);
+                          logToScreen(`Predictions for main sample at ${ts.toFixed(2)}s: ${JSON.stringify(predictions)}`);
+                          image.dispose();
+                          for (const cls of ['Hentai', 'Porn', 'Sexy']) {
+                            const pred = predictions.find(p => p.className === cls);
+                            if (pred && pred.probability > 0.7) {
+                              flaggedIdx = i;
+                              flaggedPreds = predictions;
+                              flaggedTime = ts;
+                              break;
+                            }
+                          }
+                        } catch (e) {
+                          logToScreen(`Error during NSFW analysis of main sample at ${ts.toFixed(2)}s: ${e.message}`);
+                        }
+                        try { fs.unlinkSync(thumbs[0]); } catch (e) {}
+                        if (flaggedIdx !== -1) break;
+                      }
+                      let isExplicit = false;
+                      if (flaggedIdx !== -1 && flaggedTime !== null) {
+                        // Calculate two more sample points: 5% before and after
+                        const before = Math.max(0, flaggedTime - 0.05 * duration);
+                        const after = Math.min(duration, flaggedTime + 0.05 * duration);
+                        const extraTimestamps = [before, after];
+                        let extraFlagged = 0;
+                        for (let i = 0; i < extraTimestamps.length; i++) {
+                          const ts = extraTimestamps[i];
+                          logToScreen(`Extracting and analyzing extra sample ${i+1} at ${ts.toFixed(2)}s for video: ${fullPath}`);
+                          const thumbs = await extractThumbnails(fullPath, 1, '.electron-thumbs-nsfw', [ts]);
+                          if (!thumbs[0] || !fs.existsSync(thumbs[0])) {
+                            logToScreen(`Thumbnail missing for extra sample at ${ts.toFixed(2)}s: ${thumbs[0]}`);
                             continue;
                           }
-                          const image = await tf.node.decodeImage(require('fs').readFileSync(thumb), 3);
-                          const predictions = await model.classify(image);
-                          image.dispose();
-                          if (predictions.some(p => (['Hentai', 'Porn', 'Sexy'].includes(p.className) && p.probability > 0.7))) {
-                            nsfwFound = true;
+                          try {
+                            const image = await tf.node.decodeImage(require('fs').readFileSync(thumbs[0]), 3);
+                            const predictions = await model.classify(image);
+                            logToScreen(`Predictions for extra sample at ${ts.toFixed(2)}s: ${JSON.stringify(predictions)}`);
+                            image.dispose();
+                            for (const cls of ['Hentai', 'Porn', 'Sexy']) {
+                              const pred = predictions.find(p => p.className === cls);
+                              if (pred && pred.probability > 0.7) {
+                                extraFlagged++;
+                                break;
+                              }
+                            }
+                          } catch (e) {
+                            logToScreen(`Error during NSFW analysis of extra sample at ${ts.toFixed(2)}s: ${e.message}`);
                           }
-                        } catch (e) { console.error('NSFW video image error:', e); }
-                        try { require('fs').unlinkSync(thumb); } catch (e) {}
+                          try { fs.unlinkSync(thumbs[0]); } catch (e) {}
+                        }
+                        if (extraFlagged === 2) {
+                          isExplicit = true;
+                          logToScreen(`Video marked as EXPLICIT: ${fullPath}`);
+                        } else {
+                          logToScreen(`Video NOT marked as explicit after extra samples: ${fullPath}`);
+                        }
+                      } else {
+                        logToScreen(`No main samples flagged as explicit for video: ${fullPath}`);
                       }
-                      if (nsfwFound) {
+                      // For debug tree, store the highest score for each class among all samples
+                      let maxScores = { Hentai: 0, Porn: 0, Sexy: 0 };
+                      // If flaggedPreds, use those; else, just 0s
+                      if (flaggedPreds) {
+                        for (const cls of ['Hentai', 'Porn', 'Sexy']) {
+                          const pred = flaggedPreds.find(p => p.className === cls);
+                          if (pred) maxScores[cls] = pred.probability;
+                        }
+                      }
+                      state.analyze.nsfwVideoScores[fullPath] = maxScores;
+                      if (isExplicit) {
                         state.analyze.nsfwVideos++;
                         state.analyze.nsfwVideoFiles.push(fullPath);
                       }
-                    } catch (e) { console.error('NSFW video error:', e); }
+                    } catch (e) {
+                      logToScreen(`Error during NSFW analysis of video: ${fullPath} - ${e.message}`);
+                    }
+                    nsfwProgress.done++;
                     render();
                   }));
                 }
                 else if (IMAGE_EXT.includes(ext)) {
                   state.analyze.image++;
                   nsfwPromises.push(nsfwLimit(async () => {
+                    logToScreen(`Starting NSFW analysis for image: ${fullPath}`);
                     try {
                       const image = await tf.node.decodeImage(require('fs').readFileSync(fullPath), 3);
                       const predictions = await model.classify(image);
+                      logToScreen(`Predictions for image ${fullPath}: ${JSON.stringify(predictions)}`);
                       image.dispose();
-                      if (predictions.some(p => (['Hentai', 'Porn', 'Sexy'].includes(p.className) && p.probability > 0.7))) {
+                      let scores = { Hentai: 0, Porn: 0, Sexy: 0 };
+                      for (const cls of ['Hentai', 'Porn', 'Sexy']) {
+                        const pred = predictions.find(p => p.className === cls);
+                        if (pred) scores[cls] = pred.probability;
+                      }
+                      state.analyze.nsfwImageScores[fullPath] = scores;
+                      logToScreen(`Scores for image ${fullPath}: Hentai=${scores.Hentai.toFixed(4)}, Porn=${scores.Porn.toFixed(4)}, Sexy=${scores.Sexy.toFixed(4)}`);
+                      if (scores.Hentai > 0.7 || scores.Porn > 0.7 || scores.Sexy > 0.6) {
                         state.analyze.nsfwImages++;
                         state.analyze.nsfwImageFiles.push(fullPath);
+                        logToScreen(`Image marked as EXPLICIT: ${fullPath}`);
+                      } else {
+                        logToScreen(`Image NOT marked as explicit: ${fullPath}`);
                       }
-                    } catch (e) { console.error('NSFW image error:', e); }
+                    } catch (e) {
+                      logToScreen(`Error during NSFW analysis of image: ${fullPath} - ${e.message}`);
+                    }
+                    nsfwProgress.done++;
                     render();
                   }));
                 }
                 else if (DOC_EXT.includes(ext)) state.analyze.doc++;
+                else state.analyze.other++;
                 render();
               }
             }
-          } catch (e) { console.error('Stat error:', e); }
+          } catch (e) {}
         }
-      } catch (e) { console.error('Read dir error:', e); }
+      } catch (e) {}
     }
     await scanDir(volume);
     await Promise.all(nsfwPromises);
@@ -803,7 +955,33 @@ function renderConfirmScreen(app) {
           const li = document.createElement('li');
           li.style.cursor = 'pointer';
           li.style.color = '#0066cc';
-          li.textContent = f;
+          let scoreStr = '';
+          if ((type === 'video' || type === 'nsfwVideos') && state.analyze.nsfwVideoScores[f]) {
+            const s = state.analyze.nsfwVideoScores[f];
+            scoreStr = ` (H:${s.Hentai.toFixed(2)} P:${s.Porn.toFixed(2)} S:${s.Sexy.toFixed(2)})`;
+            if (s.Hentai > 0.7 || s.Porn > 0.7 || s.Sexy > 0.6) {
+              li.style.fontWeight = 'bold';
+              li.style.color = 'red';
+            } else {
+              li.style.color = '#888';
+            }
+          } else if ((type === 'video' || type === 'nsfwVideos') && !state.analyze.nsfwVideoScores[f]) {
+            scoreStr = ' (no score)';
+            li.style.color = '#888';
+          } else if ((type === 'image' || type === 'nsfwImages') && state.analyze.nsfwImageScores[f]) {
+            const s = state.analyze.nsfwImageScores[f];
+            scoreStr = ` (H:${s.Hentai.toFixed(2)} P:${s.Porn.toFixed(2)} S:${s.Sexy.toFixed(2)})`;
+            if (s.Hentai > 0.7 || s.Porn > 0.7 || s.Sexy > 0.6) {
+              li.style.fontWeight = 'bold';
+              li.style.color = 'red';
+            } else {
+              li.style.color = '#888';
+            }
+          } else if ((type === 'image' || type === 'nsfwImages') && !state.analyze.nsfwImageScores[f]) {
+            scoreStr = ' (no score)';
+            li.style.color = '#888';
+          }
+          li.textContent = f + scoreStr;
           li.onclick = () => {
             require('electron').shell.openPath(f);
           };

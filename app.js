@@ -68,7 +68,7 @@ let state = {
   destFolder: null,
   filesToCopy: [],
   copyProgress: 0,
-  debug: false,
+  debug: true,
   analyze: {
     running: false,
     done: false,
