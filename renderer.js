@@ -363,7 +363,11 @@ function startAnalyzing(volume) {
             if (stat.isDirectory()) {
               countFiles(fullPath);
             } else if (stat.isFile()) {
-              totalFiles++;
+              const ext = path.extname(file).toLowerCase();
+              if (AUDIO_EXT.includes(ext) || VIDEO_EXT.includes(ext) || 
+                  IMAGE_EXT.includes(ext) || DOC_EXT.includes(ext)) {
+                totalFiles++;
+              }
             }
           } catch (e) { console.error('Stat error:', e); }
         }
@@ -384,58 +388,60 @@ function startAnalyzing(volume) {
             if (stat.isDirectory()) {
               await scanDir(fullPath);
             } else if (stat.isFile()) {
-              processedFiles++;
-              state.analyze.size += stat.size;
-              state.analyze.files.push(fullPath);
               const ext = path.extname(file).toLowerCase();
-              if (AUDIO_EXT.includes(ext)) state.analyze.audio++;
-              else if (VIDEO_EXT.includes(ext)) {
-                state.analyze.video++;
-                nsfwPromises.push(nsfwLimit(async () => {
-                  try {
-                    const thumbs = await extractThumbnails(fullPath, 3, '.electron-thumbs');
-                    let nsfwFound = false;
-                    for (const thumb of thumbs) {
-                      try {
-                        if (!fs.existsSync(thumb)) {
-                          console.warn('Thumbnail missing, skipping:', thumb);
-                          continue;
-                        }
-                        const image = await tf.node.decodeImage(require('fs').readFileSync(thumb), 3);
-                        const predictions = await model.classify(image);
-                        image.dispose();
-                        if (predictions.some(p => (['Hentai', 'Porn', 'Sexy'].includes(p.className) && p.probability > 0.7))) {
-                          nsfwFound = true;
-                        }
-                      } catch (e) { console.error('NSFW video image error:', e); }
-                      try { require('fs').unlinkSync(thumb); } catch (e) {}
-                    }
-                    if (nsfwFound) {
-                      state.analyze.nsfwVideos++;
-                      state.analyze.nsfwVideoFiles.push(fullPath);
-                    }
-                  } catch (e) { console.error('NSFW video error:', e); }
-                  render();
-                }));
+              if (AUDIO_EXT.includes(ext) || VIDEO_EXT.includes(ext) || 
+                  IMAGE_EXT.includes(ext) || DOC_EXT.includes(ext)) {
+                processedFiles++;
+                state.analyze.size += stat.size;
+                state.analyze.files.push(fullPath);
+                if (AUDIO_EXT.includes(ext)) state.analyze.audio++;
+                else if (VIDEO_EXT.includes(ext)) {
+                  state.analyze.video++;
+                  nsfwPromises.push(nsfwLimit(async () => {
+                    try {
+                      const thumbs = await extractThumbnails(fullPath, 3, '.electron-thumbs');
+                      let nsfwFound = false;
+                      for (const thumb of thumbs) {
+                        try {
+                          if (!fs.existsSync(thumb)) {
+                            console.warn('Thumbnail missing, skipping:', thumb);
+                            continue;
+                          }
+                          const image = await tf.node.decodeImage(require('fs').readFileSync(thumb), 3);
+                          const predictions = await model.classify(image);
+                          image.dispose();
+                          if (predictions.some(p => (['Hentai', 'Porn', 'Sexy'].includes(p.className) && p.probability > 0.7))) {
+                            nsfwFound = true;
+                          }
+                        } catch (e) { console.error('NSFW video image error:', e); }
+                        try { require('fs').unlinkSync(thumb); } catch (e) {}
+                      }
+                      if (nsfwFound) {
+                        state.analyze.nsfwVideos++;
+                        state.analyze.nsfwVideoFiles.push(fullPath);
+                      }
+                    } catch (e) { console.error('NSFW video error:', e); }
+                    render();
+                  }));
+                }
+                else if (IMAGE_EXT.includes(ext)) {
+                  state.analyze.image++;
+                  nsfwPromises.push(nsfwLimit(async () => {
+                    try {
+                      const image = await tf.node.decodeImage(require('fs').readFileSync(fullPath), 3);
+                      const predictions = await model.classify(image);
+                      image.dispose();
+                      if (predictions.some(p => (['Hentai', 'Porn', 'Sexy'].includes(p.className) && p.probability > 0.7))) {
+                        state.analyze.nsfwImages++;
+                        state.analyze.nsfwImageFiles.push(fullPath);
+                      }
+                    } catch (e) { console.error('NSFW image error:', e); }
+                    render();
+                  }));
+                }
+                else if (DOC_EXT.includes(ext)) state.analyze.doc++;
+                render();
               }
-              else if (IMAGE_EXT.includes(ext)) {
-                state.analyze.image++;
-                nsfwPromises.push(nsfwLimit(async () => {
-                  try {
-                    const image = await tf.node.decodeImage(require('fs').readFileSync(fullPath), 3);
-                    const predictions = await model.classify(image);
-                    image.dispose();
-                    if (predictions.some(p => (['Hentai', 'Porn', 'Sexy'].includes(p.className) && p.probability > 0.7))) {
-                      state.analyze.nsfwImages++;
-                      state.analyze.nsfwImageFiles.push(fullPath);
-                    }
-                  } catch (e) { console.error('NSFW image error:', e); }
-                  render();
-                }));
-              }
-              else if (DOC_EXT.includes(ext)) state.analyze.doc++;
-              else state.analyze.other++;
-              render();
             }
           } catch (e) { console.error('Stat error:', e); }
         }
@@ -475,31 +481,120 @@ function renderCopyScreen(app) {
     } else {
       item.onclick = () => {
         state.destination = volume;
-        pickFolder(volume, folder => {
-          state.destFolder = folder;
-          state.filesToCopy = state.analyze.filesToCopy;
-          state.screen = 'confirm';
-          render();
-        });
+        state.destFolder = volume; // Default to root
+        renderFolderTree(volume);
       };
     }
     list.appendChild(item);
   });
   app.appendChild(list);
-}
 
-function pickFolder(volume, cb) {
-  // Use Electron file dialog
-  const input = document.createElement('input');
-  input.type = 'file';
-  input.webkitdirectory = true;
-  input.style.display = 'none';
-  document.body.appendChild(input);
-  input.onchange = () => {
-    cb(input.files && input.files.length > 0 ? input.files[0].path : volume);
-    document.body.removeChild(input);
-  };
-  input.click();
+  // Folder tree container
+  const folderTree = document.createElement('div');
+  folderTree.id = 'folder-tree';
+  folderTree.style.marginTop = '20px';
+  folderTree.style.display = 'none';
+  app.appendChild(folderTree);
+
+  function renderFolderTree(rootPath) {
+    folderTree.style.display = 'block';
+    folderTree.innerHTML = '';
+
+    const currentPath = document.createElement('div');
+    currentPath.style.marginBottom = '10px';
+    currentPath.style.fontWeight = 'bold';
+    currentPath.textContent = `Current path: ${rootPath}`;
+    folderTree.appendChild(currentPath);
+
+    // Create new folder button
+    const newFolderBtn = document.createElement('button');
+    newFolderBtn.className = 'button';
+    newFolderBtn.textContent = 'Create New Folder';
+    newFolderBtn.style.marginBottom = '10px';
+    newFolderBtn.onclick = () => {
+      const folderName = prompt('Enter folder name:');
+      if (folderName) {
+        const newPath = path.join(rootPath, folderName);
+        try {
+          fs.mkdirSync(newPath);
+          renderFolderTree(rootPath); // Refresh the view
+        } catch (e) {
+          alert('Error creating folder: ' + e.message);
+        }
+      }
+    };
+    folderTree.appendChild(newFolderBtn);
+
+    // List folders
+    const folders = document.createElement('div');
+    folders.className = 'folder-list';
+    folders.style.marginTop = '10px';
+
+    try {
+      const items = fs.readdirSync(rootPath);
+      items.forEach(item => {
+        const fullPath = path.join(rootPath, item);
+        try {
+          const stat = fs.statSync(fullPath);
+          if (stat.isDirectory()) {
+            const folderItem = document.createElement('div');
+            folderItem.className = 'folder-item';
+            folderItem.style.padding = '5px';
+            folderItem.style.cursor = 'pointer';
+            folderItem.style.display = 'flex';
+            folderItem.style.alignItems = 'center';
+            folderItem.style.gap = '10px';
+
+            const folderIcon = document.createElement('span');
+            folderIcon.textContent = '📁';
+            folderItem.appendChild(folderIcon);
+
+            const folderName = document.createElement('span');
+            folderName.textContent = item;
+            folderItem.appendChild(folderName);
+
+            folderItem.onclick = () => {
+              renderFolderTree(fullPath);
+            };
+
+            folders.appendChild(folderItem);
+          }
+        } catch (e) {
+          console.error('Error reading item:', e);
+        }
+      });
+    } catch (e) {
+      console.error('Error reading directory:', e);
+    }
+
+    folderTree.appendChild(folders);
+
+    // Select current folder button
+    const selectBtn = document.createElement('button');
+    selectBtn.className = 'button';
+    selectBtn.textContent = 'Select This Folder';
+    selectBtn.style.marginTop = '20px';
+    selectBtn.onclick = () => {
+      state.destFolder = rootPath;
+      state.filesToCopy = state.analyze.filesToCopy;
+      state.screen = 'confirm';
+      render();
+    };
+    folderTree.appendChild(selectBtn);
+
+    // Back button (if not at root)
+    if (rootPath !== state.destination) {
+      const backBtn = document.createElement('button');
+      backBtn.className = 'button';
+      backBtn.textContent = 'Back';
+      backBtn.style.marginTop = '10px';
+      backBtn.style.marginLeft = '10px';
+      backBtn.onclick = () => {
+        renderFolderTree(path.dirname(rootPath));
+      };
+      folderTree.appendChild(backBtn);
+    }
+  }
 }
 
 function renderConfirmScreen(app) {
@@ -507,47 +602,73 @@ function renderConfirmScreen(app) {
   title.textContent = 'Confirm Copy';
   app.appendChild(title);
 
-  function makeSection(label, type, count, files) {
-    const section = document.createElement('div');
-    section.style.marginBottom = '8px';
-    const header = document.createElement('div');
-    header.style.cursor = 'pointer';
-    header.style.fontWeight = 'bold';
-    header.onclick = () => toggleType(type);
-    header.textContent = `${label}: ${count} ${expandedTypes[type] ? '▼' : '▶'}`;
-    section.appendChild(header);
-    if (expandedTypes[type]) {
-      const list = document.createElement('ul');
-      list.id = 'filelist-' + type;
-      list.style.margin = '4px 0 4px 20px';
-      list.style.maxHeight = '200px';
-      list.style.overflowY = 'auto';
-      files.forEach(f => {
-        const li = document.createElement('li');
-        li.textContent = f;
-        list.appendChild(li);
-      });
-      section.appendChild(list);
+  if (!state.debug) {
+    // Simple confirmation view for non-debug mode
+    const summary = document.createElement('div');
+    const fileTypes = [];
+    if (state.analyze.audio > 0) fileTypes.push(`${state.analyze.audio} audio file${state.analyze.audio === 1 ? '' : 's'}`);
+    if (state.analyze.image > 0) fileTypes.push(`${state.analyze.image} image${state.analyze.image === 1 ? '' : 's'}`);
+    if (state.analyze.video > 0) fileTypes.push(`${state.analyze.video} video${state.analyze.video === 1 ? '' : 's'}`);
+    if (state.analyze.doc > 0) fileTypes.push(`${state.analyze.doc} document${state.analyze.doc === 1 ? '' : 's'}`);
+    
+    const fileTypeText = fileTypes.join(', ');
+    summary.innerHTML = `
+      <p>You want to copy ${fileTypeText} from <b>${state.source}</b> to <b>${state.destFolder}</b>.</p>
+      <p>Total size: <b>${formatBytes(state.analyze.size)}</b></p>
+    `;
+    app.appendChild(summary);
+  } else {
+    // Detailed debug view
+    function makeSection(label, type, count, files) {
+      const section = document.createElement('div');
+      section.style.marginBottom = '8px';
+      const header = document.createElement('div');
+      header.style.cursor = 'pointer';
+      header.style.fontWeight = 'bold';
+      header.onclick = () => toggleType(type);
+      header.textContent = `${label}: ${count} ${expandedTypes[type] ? '▼' : '▶'}`;
+      section.appendChild(header);
+      if (expandedTypes[type]) {
+        const list = document.createElement('ul');
+        list.id = 'filelist-' + type;
+        list.style.margin = '4px 0 4px 20px';
+        list.style.maxHeight = '200px';
+        list.style.overflowY = 'auto';
+        files.forEach(f => {
+          const li = document.createElement('li');
+          li.style.cursor = 'pointer';
+          li.style.color = '#0066cc';
+          li.textContent = f;
+          li.onclick = () => {
+            require('electron').shell.openPath(f);
+          };
+          li.onmouseover = () => {
+            li.style.textDecoration = 'underline';
+          };
+          li.onmouseout = () => {
+            li.style.textDecoration = 'none';
+          };
+          list.appendChild(li);
+        });
+        section.appendChild(list);
+      }
+      return section;
     }
-    return section;
+
+    const summary = document.createElement('div');
+    summary.innerHTML = `
+      <p>You want to copy <b>${state.filesToCopy.length}</b> items from <b>${state.source}</b> to <b>${state.destFolder}</b>.</p>
+      <p>Total size: <b>${formatBytes(state.analyze.size)}</b></p>
+    `;
+    app.appendChild(summary);
+
+    app.appendChild(makeSection('Audio', 'audio', state.analyze.audio, getFilesByType('audio')));
+    app.appendChild(makeSection('Video', 'video', state.analyze.video, getFilesByType('video')));
+    app.appendChild(makeSection('Images', 'image', state.analyze.image, getFilesByType('image')));
+    app.appendChild(makeSection('Documents', 'doc', state.analyze.doc, getFilesByType('doc')));
+    app.appendChild(makeSection('NSFW Images', 'nsfwImages', state.analyze.nsfwImages, state.analyze.nsfwImageFiles));
+    app.appendChild(makeSection('NSFW Videos', 'nsfwVideos', state.analyze.nsfwVideos, state.analyze.nsfwVideoFiles));
   }
-
-  const summary = document.createElement('div');
-  summary.innerHTML = `
-    <p>You want to copy <b>${state.filesToCopy.length}</b> items from <b>${state.source}</b> to <b>${state.destFolder}</b>.</p>
-    <p>Total size: <b>${formatBytes(state.analyze.size)}</b></p>
-  `;
-  app.appendChild(summary);
-
-  app.appendChild(makeSection('Audio', 'audio', state.analyze.audio, getFilesByType('audio')));
-  app.appendChild(makeSection('Video', 'video', state.analyze.video, getFilesByType('video')));
-  app.appendChild(makeSection('Images', 'image', state.analyze.image, getFilesByType('image')));
-  app.appendChild(makeSection('Documents', 'doc', state.analyze.doc, getFilesByType('doc')));
-  app.appendChild(makeSection('Other', 'other', state.analyze.other, getFilesByType('other')));
-  // NSFW Images
-  app.appendChild(makeSection('NSFW Images', 'nsfwImages', state.analyze.nsfwImages, state.analyze.nsfwImageFiles));
-  // NSFW Videos
-  app.appendChild(makeSection('NSFW Videos', 'nsfwVideos', state.analyze.nsfwVideos, state.analyze.nsfwVideoFiles));
 
   const confirmBtn = document.createElement('button');
   confirmBtn.className = 'button';
@@ -573,12 +694,21 @@ function renderProgressScreen(app) {
   progressBar.appendChild(progressInner);
   app.appendChild(progressBar);
 
+  // Add status text
+  const statusText = document.createElement('div');
+  statusText.style.textAlign = 'center';
+  statusText.style.marginTop = '10px';
+  statusText.style.color = '#666';
+  statusText.textContent = state.copyProgress >= 1 ? 'Copy complete!' : 'Copying files...';
+  app.appendChild(statusText);
+
   if (state.copyProgress >= 1) {
     const completeBtn = document.createElement('button');
     completeBtn.className = 'button';
     completeBtn.textContent = 'Complete';
     completeBtn.onclick = () => {
-      window.close();
+      const { ipcRenderer } = require('electron');
+      ipcRenderer.send('quit-app');
     };
     app.appendChild(completeBtn);
   }
@@ -587,21 +717,80 @@ function renderProgressScreen(app) {
 function startCopy() {
   let copied = 0;
   const total = state.filesToCopy.length;
+
+  // Create backup folder name with date and time
+  const date = new Date();
+  const dateStr = date.toISOString().split('T')[0]; // YYYY-MM-DD
+  const timeStr = date.toTimeString().split(' ')[0].substring(0, 5); // HH:mm
+  const volumeName = path.basename(state.source);
+  const backupFolderName = `${volumeName}_backup_${dateStr}_${timeStr}`;
+  const backupFolderPath = path.join(state.destFolder, backupFolderName);
+
+  // Create category folders
+  const categoryFolders = {
+    audio: path.join(backupFolderPath, 'Audio'),
+    video: path.join(backupFolderPath, 'Video'),
+    image: path.join(backupFolderPath, 'Images'),
+    doc: path.join(backupFolderPath, 'Documents')
+  };
+
+  // Create all folders
+  try {
+    fs.mkdirSync(backupFolderPath);
+    Object.values(categoryFolders).forEach(folder => {
+      fs.mkdirSync(folder);
+    });
+  } catch (e) {
+    console.error('Error creating folders:', e);
+    alert('Error creating backup folders. Please try again.');
+    return;
+  }
+
+  function getCategoryFolder(file) {
+    const ext = path.extname(file).toLowerCase();
+    if (AUDIO_EXT.includes(ext)) return categoryFolders.audio;
+    if (VIDEO_EXT.includes(ext)) return categoryFolders.video;
+    if (IMAGE_EXT.includes(ext)) return categoryFolders.image;
+    if (DOC_EXT.includes(ext)) return categoryFolders.doc;
+    return null;
+  }
+
   function copyNext() {
     if (copied >= total) {
       state.copyProgress = 1;
       render();
       return;
     }
+
     const src = state.filesToCopy[copied];
-    const dest = path.join(state.destFolder, path.basename(src));
+    const categoryFolder = getCategoryFolder(src);
+    if (!categoryFolder) {
+      copied++;
+      state.copyProgress = copied / total;
+      render();
+      setTimeout(copyNext, 10);
+      return;
+    }
+
+    const dest = path.join(categoryFolder, path.basename(src));
     fs.copyFile(src, dest, err => {
+      if (err) {
+        console.error('Error copying file:', err);
+        // Continue with next file even if this one fails
+      }
       copied++;
       state.copyProgress = copied / total;
       render();
       setTimeout(copyNext, 10);
     });
   }
+
+  // Update the progress screen to show the backup folder path
+  const progressTitle = document.querySelector('h2');
+  if (progressTitle) {
+    progressTitle.textContent = `Copying to ${backupFolderPath}`;
+  }
+
   copyNext();
 }
 
