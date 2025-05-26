@@ -110,7 +110,7 @@ async function loadNSFWModel() {
   if (!nsfwModel) {
     console.log('gonna load');
     try {
-        nsfwModel = await nsfw.load('http://localhost:7001/models/mobilenet_v2/');
+        nsfwModel = await nsfw.load('file://./models/mobilenet_v2/');
     } catch (err) {
         console.error(err);
     }
