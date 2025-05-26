@@ -243,6 +243,43 @@ function getFilesByType(type) {
   });
 }
 
+// Add close button function
+function createCloseButton() {
+  const closeBtn = document.createElement('button');
+  closeBtn.textContent = '✕ Close App';
+  closeBtn.style.position = 'fixed';
+  closeBtn.style.top = '20px';
+  closeBtn.style.right = '20px';
+  closeBtn.style.padding = '10px 20px';
+  closeBtn.style.backgroundColor = '#ff4444';
+  closeBtn.style.color = 'white';
+  closeBtn.style.border = 'none';
+  closeBtn.style.borderRadius = '5px';
+  closeBtn.style.cursor = 'pointer';
+  closeBtn.style.fontWeight = 'bold';
+  closeBtn.style.boxShadow = '0 2px 5px rgba(0,0,0,0.2)';
+  closeBtn.style.zIndex = '1000';
+  closeBtn.style.transition = 'background-color 0.2s';
+  
+  // Add hover effect
+  closeBtn.onmouseover = () => {
+    closeBtn.style.backgroundColor = '#ff0000';
+  };
+  closeBtn.onmouseout = () => {
+    closeBtn.style.backgroundColor = '#ff4444';
+  };
+  
+  // Add click handler
+  closeBtn.onclick = () => {
+    if (confirm('Are you sure you want to close the application? Any unsaved progress will be lost.')) {
+      const { ipcRenderer } = require('electron');
+      ipcRenderer.send('quit-app');
+    }
+  };
+  
+  return closeBtn;
+}
+
 function render() {
   saveListScrollTops();
   const app = document.getElementById('app');
@@ -254,10 +291,21 @@ function render() {
     existingDebugMenu.remove();
   }
 
+  // Remove existing close button if it exists
+  const existingCloseBtn = document.querySelector('.close-button');
+  if (existingCloseBtn) {
+    existingCloseBtn.remove();
+  }
+
+  // Add close button
+  const closeBtn = createCloseButton();
+  closeBtn.className = 'close-button';
+  document.body.appendChild(closeBtn);
+
   // Add debug menu if debug mode is active
   if (state.debug) {
     const debugMenu = createDebugMenu();
-    debugMenu.className = 'debug-menu'; // Add a class for easy identification
+    debugMenu.className = 'debug-menu';
     document.body.appendChild(debugMenu);
   }
 
