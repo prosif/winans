@@ -10,11 +10,11 @@ async function fn() {
     const fs = require('fs');
 
     // Extract thumbnails
-    const thumbnails = await extractThumbnails('/Users/josephgarcia/cleancopy/nsfw_test.mp4', 5);
+    const thumbnails = await extractThumbnails('/Users/josephgarcia/cleancopy/test2.webm', 10);
     console.log('Generated thumbnails:', thumbnails);
 
     // Load the NSFW model
-    const model = await nsfw.load('http://localhost:7001/models/mobilenet_v2/');
+    const model = await nsfw.load('file://./models/mobilenet_v2/');
 
     // Process each thumbnail
     for (const thumbnailPath of thumbnails) {
