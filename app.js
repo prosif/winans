@@ -1,6 +1,9 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const tf = require('@tensorflow/tfjs-node');
+const nsfw = require('nsfwjs');
+const { extractThumbnails } = require('./video_utils');
 
 // File type extensions
 const AUDIO_EXT = ['.mp3', '.wav', '.aac', '.flac', '.ogg', '.m4a'];
@@ -8,6 +11,7 @@ const VIDEO_EXT = ['.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm'];
 const IMAGE_EXT = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp'];
 const DOC_EXT = ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.txt', '.md', '.rtf', '.odt'];
 
+console.log('hfshfsdhf!');
 // Helper to get local volumes (cross-platform)
 function getVolumes() {
   const platform = os.platform();
@@ -64,6 +68,7 @@ let state = {
   destFolder: null,
   filesToCopy: [],
   copyProgress: 0,
+  debug: false,
   analyze: {
     running: false,
     done: false,
@@ -74,13 +79,73 @@ let state = {
     other: 0,
     total: 0,
     size: 0,
-    files: []
+    files: [],
+    nsfwImages: 0,
+    nsfwVideos: 0,
+    nsfwImageFiles: [],
+    nsfwVideoFiles: []
   }
 };
+
+// Konami code sequence
+const KONAMI_CODE = ['ArrowUp', 'ArrowUp', 'ArrowDown', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'ArrowLeft', 'ArrowRight', 'b', 'a'];
+let konamiIndex = 0;
+
+// Add Konami code listener
+document.addEventListener('keydown', (e) => {
+  if (e.key === KONAMI_CODE[konamiIndex]) {
+    konamiIndex++;
+    if (konamiIndex === KONAMI_CODE.length) {
+      state.debug = !state.debug;
+      konamiIndex = 0;
+      render();
+    }
+  } else {
+    konamiIndex = 0;
+  }
+});
+
+let nsfwModel = null;
+async function loadNSFWModel() {
+  if (!nsfwModel) {
+    console.log('gonna load');
+    try {
+        nsfwModel = await nsfw.load('http://localhost:7001/models/mobilenet_v2/');
+    } catch (err) {
+        console.error(err);
+    }
+    console.log('loaded');
+  }
+  return nsfwModel;
+}
+
+// Add a log area to the UI and override console.log/error to show logs on screen
+function logToScreen(msg) {
+  const logDiv = document.getElementById('log');
+  if (logDiv) {
+    logDiv.textContent += msg + '\n';
+    logDiv.scrollTop = logDiv.scrollHeight;
+  }
+}
+console.log = (...args) => { logToScreen(args.join(' ')); };
+console.error = (...args) => { logToScreen('ERROR: ' + args.join(' ')); };
 
 function render() {
   const app = document.getElementById('app');
   app.innerHTML = '';
+  // Add log area at the top
+  let logDiv = document.getElementById('log');
+  if (!logDiv) {
+    logDiv = document.createElement('div');
+    logDiv.id = 'log';
+    logDiv.style.whiteSpace = 'pre';
+    logDiv.style.background = '#222';
+    logDiv.style.color = '#fff';
+    logDiv.style.padding = '10px';
+    logDiv.style.maxHeight = '200px';
+    logDiv.style.overflow = 'auto';
+    document.body.insertBefore(logDiv, app);
+  }
   if (state.screen === 'main') {
     renderMainScreen(app);
   } else if (state.screen === 'analyzing') {
@@ -118,7 +183,11 @@ function renderMainScreen(app) {
         other: 0,
         total: 0,
         size: 0,
-        files: []
+        files: [],
+        nsfwImages: 0,
+        nsfwVideos: 0,
+        nsfwImageFiles: [],
+        nsfwVideoFiles: []
       };
       render();
       startAnalyzing(volume);
@@ -133,39 +202,107 @@ function renderAnalyzingScreen(app) {
   title.textContent = state.analyze.done ? 'Files to copy' : 'Analyzing Volume...';
   app.appendChild(title);
 
-  // Breakdown for 'other' file types
-  let otherBreakdown = '';
-  if (state.analyze.done && state.analyze.other > 0) {
-    const extCounts = {};
-    for (const file of state.analyze.files) {
-      const ext = path.extname(file).toLowerCase();
-      if (
-        !AUDIO_EXT.includes(ext) &&
-        !VIDEO_EXT.includes(ext) &&
-        !IMAGE_EXT.includes(ext) &&
-        !DOC_EXT.includes(ext)
-      ) {
-        extCounts[ext || '(no ext)'] = (extCounts[ext || '(no ext)'] || 0) + 1;
+  if (!state.debug) {
+    // Simple progress view for non-debug mode
+    const progressContainer = document.createElement('div');
+    progressContainer.style.width = '100%';
+    progressContainer.style.maxWidth = '400px';
+    progressContainer.style.margin = '20px auto';
+    
+    const progressBar = document.createElement('div');
+    progressBar.style.width = '100%';
+    progressBar.style.height = '20px';
+    progressBar.style.background = '#f0f0f0';
+    progressBar.style.borderRadius = '10px';
+    progressBar.style.overflow = 'hidden';
+    
+    const progressInner = document.createElement('div');
+    const progress = state.analyze.total > 0 ? (state.analyze.files.length / state.analyze.total) : 0;
+    progressInner.style.width = `${progress * 100}%`;
+    progressInner.style.height = '100%';
+    progressInner.style.background = '#4CAF50';
+    progressInner.style.transition = 'width 0.3s ease';
+    
+    progressBar.appendChild(progressInner);
+    progressContainer.appendChild(progressBar);
+    
+    const statusText = document.createElement('div');
+    statusText.style.textAlign = 'center';
+    statusText.style.marginTop = '10px';
+    statusText.style.color = '#666';
+    statusText.textContent = state.analyze.done ? 'Analysis complete' : `Finding files... (${state.analyze.files.length}/${state.analyze.total})`;
+    
+    progressContainer.appendChild(statusText);
+    app.appendChild(progressContainer);
+  } else {
+    // Detailed debug view
+    // Breakdown for 'other' file types
+    let otherBreakdown = '';
+    if (state.analyze.done && state.analyze.other > 0) {
+      const extCounts = {};
+      for (const file of state.analyze.files) {
+        const ext = path.extname(file).toLowerCase();
+        if (
+          !AUDIO_EXT.includes(ext) &&
+          !VIDEO_EXT.includes(ext) &&
+          !IMAGE_EXT.includes(ext) &&
+          !DOC_EXT.includes(ext)
+        ) {
+          extCounts[ext || '(no ext)'] = (extCounts[ext || '(no ext)'] || 0) + 1;
+        }
       }
+      otherBreakdown = '<ul style="margin:0 0 0 20px;">';
+      for (const ext in extCounts) {
+        otherBreakdown += `<li>${ext}: <b>${extCounts[ext]}</b></li>`;
+      }
+      otherBreakdown += '</ul>';
     }
-    otherBreakdown = '<ul style="margin:0 0 0 20px;">';
-    for (const ext in extCounts) {
-      otherBreakdown += `<li>${ext}: <b>${extCounts[ext]}</b></li>`;
-    }
-    otherBreakdown += '</ul>';
-  }
 
-  const progress = document.createElement('div');
-  progress.innerHTML = `
-    <p>Audio: <b>${state.analyze.audio}</b></p>
-    <p>Video: <b>${state.analyze.video}</b></p>
-    <p>Images: <b>${state.analyze.image}</b></p>
-    <p>Documents: <b>${state.analyze.doc}</b></p>
-    <p>Other: <b>${state.analyze.other}</b>${otherBreakdown}</p>
-    <p>Total files: <b>${state.analyze.total}</b></p>
-    <p>Total size: <b>${formatBytes(state.analyze.size)}</b></p>
-  `;
-  app.appendChild(progress);
+    const progress = document.createElement('div');
+    progress.innerHTML = `
+      <p>Audio: <b>${state.analyze.audio}</b></p>
+      <p>Video: <b>${state.analyze.video}</b></p>
+      <p>Images: <b>${state.analyze.image}</b></p>
+      <p>Documents: <b>${state.analyze.doc}</b></p>
+      <p>Other: <b>${state.analyze.other}</b>${otherBreakdown}</p>
+      <p>NSFW Images: <b>${state.analyze.nsfwImages}</b></p>
+      <p>NSFW Videos: <b>${state.analyze.nsfwVideos}</b></p>
+      <p>Total files: <b>${state.analyze.total}</b></p>
+      <p>Total size: <b>${formatBytes(state.analyze.size)}</b></p>
+    `;
+    app.appendChild(progress);
+
+    // Add file list with clickable links in debug mode
+    if (state.analyze.done) {
+      const fileList = document.createElement('div');
+      fileList.style.marginTop = '20px';
+      fileList.style.maxHeight = '300px';
+      fileList.style.overflowY = 'auto';
+      fileList.style.border = '1px solid #ccc';
+      fileList.style.padding = '10px';
+      
+      state.analyze.files.forEach(file => {
+        const fileItem = document.createElement('div');
+        fileItem.style.padding = '5px';
+        fileItem.style.cursor = 'pointer';
+        fileItem.style.color = '#0066cc';
+        fileItem.textContent = file;
+        fileItem.onclick = () => {
+          // Use NW.js to open the file
+          nw.Shell.openItem(file);
+        };
+        fileItem.onmouseover = () => {
+          fileItem.style.textDecoration = 'underline';
+        };
+        fileItem.onmouseout = () => {
+          fileItem.style.textDecoration = 'none';
+        };
+        fileList.appendChild(fileItem);
+      });
+      
+      app.appendChild(fileList);
+    }
+  }
 
   if (!state.analyze.done) {
     const spinner = document.createElement('div');
@@ -187,50 +324,109 @@ function renderAnalyzingScreen(app) {
 }
 
 function startAnalyzing(volume) {
-  // Recursively scan files, update state.analyze as we go
-  let pending = 0;
-  let done = false;
-  function scanDir(dir) {
-    try {
-      const files = fs.readdirSync(dir);
-      files.forEach(file => {
-        const fullPath = path.join(dir, file);
-        try {
-          const stat = fs.statSync(fullPath);
-          if (stat.isDirectory()) {
-            pending++;
-            setTimeout(() => {
-              scanDir(fullPath);
-              pending--;
-              if (pending === 0 && !done) finish();
-            }, 0);
-          } else if (stat.isFile()) {
-            state.analyze.total++;
-            state.analyze.size += stat.size;
-            state.analyze.files.push(fullPath);
-            const ext = path.extname(file).toLowerCase();
-            if (AUDIO_EXT.includes(ext)) state.analyze.audio++;
-            else if (VIDEO_EXT.includes(ext)) state.analyze.video++;
-            else if (IMAGE_EXT.includes(ext)) state.analyze.image++;
-            else if (DOC_EXT.includes(ext)) state.analyze.doc++;
-            else state.analyze.other++;
-            render();
-          }
-        } catch (e) {}
-      });
-    } catch (e) {}
-  }
-  function finish() {
-    done = true;
+  (async () => {
+    const model = await loadNSFWModel();
+    let nsfwPromises = [];
+    state.analyze.nsfwImages = 0;
+    state.analyze.nsfwVideos = 0;
+    state.analyze.nsfwImageFiles = [];
+    state.analyze.nsfwVideoFiles = [];
+
+    // First pass: count total files
+    let totalFiles = 0;
+    function countFiles(dir) {
+      try {
+        const files = fs.readdirSync(dir);
+        for (const file of files) {
+          const fullPath = path.join(dir, file);
+          try {
+            const stat = fs.statSync(fullPath);
+            if (stat.isDirectory()) {
+              countFiles(fullPath);
+            } else if (stat.isFile()) {
+              totalFiles++;
+            }
+          } catch (e) { console.error('Stat error:', e); }
+        }
+      } catch (e) { console.error('Read dir error:', e); }
+    }
+    countFiles(volume);
+    state.analyze.total = totalFiles;
+
+    let processedFiles = 0;
+    async function scanDir(dir) {
+      try {
+        const files = fs.readdirSync(dir);
+        for (const file of files) {
+          const fullPath = path.join(dir, file);
+          try {
+            const stat = fs.statSync(fullPath);
+            if (stat.isDirectory()) {
+              await scanDir(fullPath);
+            } else if (stat.isFile()) {
+              processedFiles++;
+              state.analyze.size += stat.size;
+              state.analyze.files.push(fullPath);
+              const ext = path.extname(file).toLowerCase();
+              if (AUDIO_EXT.includes(ext)) state.analyze.audio++;
+              else if (VIDEO_EXT.includes(ext)) {
+                state.analyze.video++;
+                // NSFW check for video
+                nsfwPromises.push((async () => {
+                  try {
+                    const thumbs = await extractThumbnails(fullPath, 3, '.nwjs-thumbs');
+                    let nsfwFound = false;
+                    for (const thumb of thumbs) {
+                      try {
+                        const image = await tf.node.decodeImage(require('fs').readFileSync(thumb), 3);
+                        const predictions = await model.classify(image);
+                        image.dispose();
+                        if (predictions.some(p => (['Hentai', 'Porn', 'Sexy'].includes(p.className) && p.probability > 0.7))) {
+                          nsfwFound = true;
+                        }
+                      } catch (e) { console.error('NSFW video image error:', e); }
+                      // Clean up thumbnail
+                      try { require('fs').unlinkSync(thumb); } catch (e) {}
+                    }
+                    if (nsfwFound) {
+                      state.analyze.nsfwVideos++;
+                      state.analyze.nsfwVideoFiles.push(fullPath);
+                    }
+                  } catch (e) { console.error('NSFW video error:', e); }
+                  render();
+                })());
+              }
+              else if (IMAGE_EXT.includes(ext)) {
+                state.analyze.image++;
+                // NSFW check for image
+                nsfwPromises.push((async () => {
+                  try {
+                    const image = await tf.node.decodeImage(require('fs').readFileSync(fullPath), 3);
+                    const predictions = await model.classify(image);
+                    image.dispose();
+                    if (predictions.some(p => (['Hentai', 'Porn', 'Sexy'].includes(p.className) && p.probability > 0.7))) {
+                      state.analyze.nsfwImages++;
+                      state.analyze.nsfwImageFiles.push(fullPath);
+                    }
+                  } catch (e) { console.error('NSFW image error:', e); }
+                  render();
+                })());
+              }
+              else if (DOC_EXT.includes(ext)) state.analyze.doc++;
+              else state.analyze.other++;
+              render();
+            }
+          } catch (e) { console.error('Stat error:', e); }
+        }
+      } catch (e) { console.error('Read dir error:', e); }
+    }
+    await scanDir(volume);
+    await Promise.all(nsfwPromises);
     state.analyze.done = true;
     state.analyze.running = false;
     state.analyze.filesToCopy = state.analyze.files.slice();
     render();
-  }
-  pending = 1;
-  scanDir(volume);
-  pending--;
-  if (pending === 0 && !done) finish();
+  })();
 }
 
 function renderCopyScreen(app) {
