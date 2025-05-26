@@ -248,9 +248,16 @@ function render() {
   const app = document.getElementById('app');
   app.innerHTML = '';
 
+  // Remove existing debug menu if it exists
+  const existingDebugMenu = document.querySelector('.debug-menu');
+  if (existingDebugMenu) {
+    existingDebugMenu.remove();
+  }
+
   // Add debug menu if debug mode is active
   if (state.debug) {
     const debugMenu = createDebugMenu();
+    debugMenu.className = 'debug-menu'; // Add a class for easy identification
     document.body.appendChild(debugMenu);
   }
 
@@ -528,7 +535,7 @@ function startAnalyzing(volume) {
     state.analyze.done = true;
     state.analyze.running = false;
     // Apply initial filter based on current filter mode
-    state.analyze.filesToCopy = filterFiles(state.analyze.files);
+    state.filesToCopy = filterFiles(state.analyze.files);
     render();
   })();
 }
@@ -653,7 +660,10 @@ function renderCopyScreen(app) {
     selectBtn.style.marginTop = '20px';
     selectBtn.onclick = () => {
       state.destFolder = rootPath;
-      state.filesToCopy = state.analyze.filesToCopy;
+      // Ensure filesToCopy is set before moving to confirm screen
+      if (!state.filesToCopy || state.filesToCopy.length === 0) {
+        state.filesToCopy = filterFiles(state.analyze.files);
+      }
       state.screen = 'confirm';
       render();
     };
@@ -679,19 +689,49 @@ function renderConfirmScreen(app) {
   title.textContent = 'Confirm Copy';
   app.appendChild(title);
 
+  // Ensure filesToCopy is set
+  if (!state.filesToCopy || state.filesToCopy.length === 0) {
+    state.filesToCopy = filterFiles(state.analyze.files);
+  }
+
+  // Calculate filtered counts and size
+  const filteredCounts = {
+    audio: 0,
+    video: 0,
+    image: 0,
+    doc: 0
+  };
+  let filteredSize = 0;
+
+  state.filesToCopy.forEach(file => {
+    const ext = path.extname(file).toLowerCase();
+    if (AUDIO_EXT.includes(ext)) filteredCounts.audio++;
+    else if (VIDEO_EXT.includes(ext)) filteredCounts.video++;
+    else if (IMAGE_EXT.includes(ext)) filteredCounts.image++;
+    else if (DOC_EXT.includes(ext)) filteredCounts.doc++;
+
+    try {
+      const stat = fs.statSync(file);
+      filteredSize += stat.size;
+    } catch (e) {
+      console.error('Error getting file size:', e);
+    }
+  });
+
   if (!state.debug) {
     // Simple confirmation view for non-debug mode
     const summary = document.createElement('div');
     const fileTypes = [];
-    if (state.analyze.audio > 0) fileTypes.push(`${state.analyze.audio} audio file${state.analyze.audio === 1 ? '' : 's'}`);
-    if (state.analyze.image > 0) fileTypes.push(`${state.analyze.image} image${state.analyze.image === 1 ? '' : 's'}`);
-    if (state.analyze.video > 0) fileTypes.push(`${state.analyze.video} video${state.analyze.video === 1 ? '' : 's'}`);
-    if (state.analyze.doc > 0) fileTypes.push(`${state.analyze.doc} document${state.analyze.doc === 1 ? '' : 's'}`);
+    if (filteredCounts.audio > 0) fileTypes.push(`${filteredCounts.audio} audio file${filteredCounts.audio === 1 ? '' : 's'}`);
+    if (filteredCounts.image > 0) fileTypes.push(`${filteredCounts.image} image${filteredCounts.image === 1 ? '' : 's'}`);
+    if (filteredCounts.video > 0) fileTypes.push(`${filteredCounts.video} video${filteredCounts.video === 1 ? '' : 's'}`);
+    if (filteredCounts.doc > 0) fileTypes.push(`${filteredCounts.doc} document${filteredCounts.doc === 1 ? '' : 's'}`);
     
     const fileTypeText = fileTypes.join(', ');
     summary.innerHTML = `
       <p>You want to copy ${fileTypeText} from <b>${state.source}</b> to <b>${state.destFolder}</b>.</p>
-      <p>Total size: <b>${formatBytes(state.analyze.size)}</b></p>
+      <p>Total size: <b>${formatBytes(filteredSize)}</b></p>
+      <p>Files to copy: <b>${state.filesToCopy.length}</b></p>
     `;
     app.appendChild(summary);
   } else {
@@ -735,16 +775,24 @@ function renderConfirmScreen(app) {
     const summary = document.createElement('div');
     summary.innerHTML = `
       <p>You want to copy <b>${state.filesToCopy.length}</b> items from <b>${state.source}</b> to <b>${state.destFolder}</b>.</p>
-      <p>Total size: <b>${formatBytes(state.analyze.size)}</b></p>
+      <p>Total size: <b>${formatBytes(filteredSize)}</b></p>
+      <p>Current filter mode: <b>${state.filterMode}</b></p>
+      <p>Filtered counts:</p>
+      <ul>
+        <li>Audio: <b>${filteredCounts.audio}</b></li>
+        <li>Video: <b>${filteredCounts.video}</b></li>
+        <li>Images: <b>${filteredCounts.image}</b></li>
+        <li>Documents: <b>${filteredCounts.doc}</b></li>
+      </ul>
     `;
     app.appendChild(summary);
 
-    app.appendChild(makeSection('Audio', 'audio', state.analyze.audio, getFilesByType('audio')));
-    app.appendChild(makeSection('Video', 'video', state.analyze.video, getFilesByType('video')));
-    app.appendChild(makeSection('Images', 'image', state.analyze.image, getFilesByType('image')));
-    app.appendChild(makeSection('Documents', 'doc', state.analyze.doc, getFilesByType('doc')));
-    app.appendChild(makeSection('NSFW Images', 'nsfwImages', state.analyze.nsfwImages, state.analyze.nsfwImageFiles));
-    app.appendChild(makeSection('NSFW Videos', 'nsfwVideos', state.analyze.nsfwVideos, state.analyze.nsfwVideoFiles));
+    // Show filtered files in debug mode
+    const filteredFiles = state.filesToCopy;
+    app.appendChild(makeSection('Audio', 'audio', filteredCounts.audio, filteredFiles.filter(f => AUDIO_EXT.includes(path.extname(f).toLowerCase()))));
+    app.appendChild(makeSection('Video', 'video', filteredCounts.video, filteredFiles.filter(f => VIDEO_EXT.includes(path.extname(f).toLowerCase()))));
+    app.appendChild(makeSection('Images', 'image', filteredCounts.image, filteredFiles.filter(f => IMAGE_EXT.includes(path.extname(f).toLowerCase()))));
+    app.appendChild(makeSection('Documents', 'doc', filteredCounts.doc, filteredFiles.filter(f => DOC_EXT.includes(path.extname(f).toLowerCase()))));
   }
 
   const confirmBtn = document.createElement('button');
@@ -803,15 +851,24 @@ function startCopy() {
   const backupFolderName = `${volumeName}_backup_${dateStr}_${timeStr}`;
   const backupFolderPath = path.join(state.destFolder, backupFolderName);
 
-  // Create category folders
-  const categoryFolders = {
-    audio: path.join(backupFolderPath, 'Audio'),
-    video: path.join(backupFolderPath, 'Video'),
-    image: path.join(backupFolderPath, 'Images'),
-    doc: path.join(backupFolderPath, 'Documents')
-  };
+  // Calculate which category folders we need
+  const neededCategories = new Set();
+  state.filesToCopy.forEach(file => {
+    const ext = path.extname(file).toLowerCase();
+    if (AUDIO_EXT.includes(ext)) neededCategories.add('audio');
+    else if (VIDEO_EXT.includes(ext)) neededCategories.add('video');
+    else if (IMAGE_EXT.includes(ext)) neededCategories.add('image');
+    else if (DOC_EXT.includes(ext)) neededCategories.add('doc');
+  });
 
-  // Create all folders
+  // Create category folders only for needed categories
+  const categoryFolders = {};
+  if (neededCategories.has('audio')) categoryFolders.audio = path.join(backupFolderPath, 'Audio');
+  if (neededCategories.has('video')) categoryFolders.video = path.join(backupFolderPath, 'Video');
+  if (neededCategories.has('image')) categoryFolders.image = path.join(backupFolderPath, 'Images');
+  if (neededCategories.has('doc')) categoryFolders.doc = path.join(backupFolderPath, 'Documents');
+
+  // Create all needed folders
   try {
     fs.mkdirSync(backupFolderPath);
     Object.values(categoryFolders).forEach(folder => {
