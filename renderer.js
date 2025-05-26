@@ -97,6 +97,7 @@ let state = {
   filesToCopy: [],
   copyProgress: 0,
   debug: false,
+  filterMode: 'explicit', // 'explicit', 'non-explicit', 'none'
   analyze: {
     running: false,
     done: false,
@@ -132,6 +133,74 @@ document.addEventListener('keydown', (e) => {
     konamiIndex = 0;
   }
 });
+
+// Add debug menu
+function createDebugMenu() {
+  const menu = document.createElement('div');
+  menu.style.position = 'fixed';
+  menu.style.top = '10px';
+  menu.style.right = '10px';
+  menu.style.background = '#f0f0f0';
+  menu.style.padding = '10px';
+  menu.style.borderRadius = '5px';
+  menu.style.boxShadow = '0 2px 5px rgba(0,0,0,0.2)';
+  menu.style.zIndex = '1000';
+
+  const title = document.createElement('div');
+  title.textContent = 'Debug Menu';
+  title.style.fontWeight = 'bold';
+  title.style.marginBottom = '10px';
+  menu.appendChild(title);
+
+  const filterLabel = document.createElement('div');
+  filterLabel.textContent = 'Filter:';
+  filterLabel.style.marginBottom = '5px';
+  menu.appendChild(filterLabel);
+
+  const filterOptions = ['explicit', 'non-explicit', 'none'];
+  filterOptions.forEach(option => {
+    const label = document.createElement('label');
+    label.style.display = 'block';
+    label.style.marginBottom = '5px';
+    label.style.cursor = 'pointer';
+
+    const radio = document.createElement('input');
+    radio.type = 'radio';
+    radio.name = 'filter';
+    radio.value = option;
+    radio.checked = state.filterMode === option;
+    radio.onchange = () => {
+      state.filterMode = option;
+      if (state.analyze.done) {
+        // Re-filter files if analysis is complete
+        state.filesToCopy = filterFiles(state.analyze.files);
+        render();
+      }
+    };
+
+    const text = document.createElement('span');
+    text.textContent = option === 'explicit' ? 'Filter explicit (default)' :
+                      option === 'non-explicit' ? 'Filter non-explicit' :
+                      'No filter';
+
+    label.appendChild(radio);
+    label.appendChild(text);
+    menu.appendChild(label);
+  });
+
+  return menu;
+}
+
+// Filter files based on current filter mode
+function filterFiles(files) {
+  if (state.filterMode === 'none') return files;
+  
+  return files.filter(file => {
+    const isNSFW = state.analyze.nsfwImageFiles.includes(file) || 
+                   state.analyze.nsfwVideoFiles.includes(file);
+    return state.filterMode === 'explicit' ? !isNSFW : isNSFW;
+  });
+}
 
 let nsfwModel = null;
 async function loadNSFWModel() {
@@ -178,6 +247,13 @@ function render() {
   saveListScrollTops();
   const app = document.getElementById('app');
   app.innerHTML = '';
+
+  // Add debug menu if debug mode is active
+  if (state.debug) {
+    const debugMenu = createDebugMenu();
+    document.body.appendChild(debugMenu);
+  }
+
   if (state.screen === 'main') {
     renderMainScreen(app);
   } else if (state.screen === 'analyzing') {
@@ -451,7 +527,8 @@ function startAnalyzing(volume) {
     await Promise.all(nsfwPromises);
     state.analyze.done = true;
     state.analyze.running = false;
-    state.analyze.filesToCopy = state.analyze.files.slice();
+    // Apply initial filter based on current filter mode
+    state.analyze.filesToCopy = filterFiles(state.analyze.files);
     render();
   })();
 }
